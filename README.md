@@ -1,18 +1,8 @@
-docker-postfix
+postfix
 ==============
 
 run postfix with smtp authentication (sasldb) in a docker container.
 TLS, OpenDKIM and Certbot (Cloudflare) support are optional.
-
-## Requirement
-+ Docker 1.0
-
-## Installation
-1. Build image
-
-	```bash
-	$ sudo docker pull jeansf/postfix
-	```
 
 ## Usage
 1. Create postfix container with smtp authentication
