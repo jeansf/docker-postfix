@@ -1,5 +1,8 @@
 #!/bin/bash
 
+mkdir -p /etc/opendkim/domainkeys /etc/letsencrypt/
+rm -Rf /etc/cron.*/*
+
 #judgement
 if [[ -a /etc/supervisor/conf.d/supervisord.conf ]]; then
   exit 0
@@ -9,12 +12,13 @@ fi
 cat > /etc/supervisor/conf.d/supervisord.conf <<EOF
 [supervisord]
 nodaemon=true
+user=root
 
 [program:postfix]
 command=/opt/postfix.sh
 
-[program:rsyslog]
-command=/usr/sbin/rsyslogd -n -c3
+[program:cron]
+command=cron -f
 EOF
 
 ############
@@ -22,12 +26,17 @@ EOF
 ############
 cat >> /opt/postfix.sh <<EOF
 #!/bin/bash
-service postfix start
+if pidof -x master >/dev/null; then
+  service postfix restart
+else
+  service postfix start
+fi
 tail -f /var/log/mail.log
 EOF
 chmod +x /opt/postfix.sh
 postconf -e myhostname=$maildomain
 postconf -F '*/*/chroot = n'
+postconf -e maillog_file=/var/log/mail.log
 
 ############
 # SASL SUPPORT FOR CLIENTS
@@ -54,11 +63,10 @@ chown postfix.sasl /etc/sasldb2
 ############
 # Enable TLS
 ############
-if [[ -n "$(find /etc/postfix/certs -iname *.crt)" && -n "$(find /etc/postfix/certs -iname *.key)" ]]; then
+if [ "$enable_tls" = true ] ; then
   # /etc/postfix/main.cf
-  postconf -e smtpd_tls_cert_file=$(find /etc/postfix/certs -iname *.crt)
-  postconf -e smtpd_tls_key_file=$(find /etc/postfix/certs -iname *.key)
-  chmod 400 /etc/postfix/certs/*.*
+  postconf -e smtpd_tls_cert_file=/etc/letsencrypt/live/$maildomain/fullchain.pem
+  postconf -e smtpd_tls_key_file=/etc/letsencrypt/live/$maildomain/privkey.pem
   # /etc/postfix/master.cf
   postconf -M submission/inet="submission   inet   n   -   n   -   -   smtpd"
   postconf -P "submission/inet/syslog_name=postfix/submission"
@@ -66,6 +74,24 @@ if [[ -n "$(find /etc/postfix/certs -iname *.crt)" && -n "$(find /etc/postfix/ce
   postconf -P "submission/inet/smtpd_sasl_auth_enable=yes"
   postconf -P "submission/inet/milter_macro_daemon_name=ORIGINATING"
   postconf -P "submission/inet/smtpd_recipient_restrictions=permit_sasl_authenticated,reject_unauth_destination"
+fi
+
+############
+# Cloudflare credentials
+############
+if [ ! -z "$cloudflare_api_token" ] ; then
+  echo "dns_cloudflare_api_token = \"$cloudflare_api_token\"" > /etc/letsencrypt/credentials
+  chmod 0600 /etc/letsencrypt/credentials
+
+  if [ ! -f "/etc/letsencrypt/live/$maildomain/fullchain.pem" ]; then
+     certbot certonly --non-interactive --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/credentials --agree-tos --register-unsafely-without-email -d $maildomain --post-hook "supervisorctl restart postfix"
+  fi
+
+cat >> /etc/cron.daily/certbot <<EOF
+#!/bin/bash
+
+certbot renew --non-interactive --no-self-upgrade --dns-cloudflare --dns-cloudflare-credentials /etc/letsencrypt/credentials --agree-tos --post-hook "supervisorctl restart postfix"
+EOF
 fi
 
 #############
@@ -116,8 +142,10 @@ EOF
 cat >> /etc/opendkim/TrustedHosts <<EOF
 127.0.0.1
 localhost
+email
 192.168.0.1/24
 
+$maildomain
 *.$maildomain
 EOF
 cat >> /etc/opendkim/KeyTable <<EOF
